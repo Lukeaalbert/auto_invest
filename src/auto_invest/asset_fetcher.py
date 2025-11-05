@@ -215,8 +215,7 @@ class AssetFetcher:
         for rec in reccomendations:
             print(rec)
 
-    def __init__(self, channels_filename: str, days_ago: int = 1, maxAssets: int = 5):
-        self.__maxAssets = maxAssets
+    def __init__(self, channels_filename: str, days_ago: int = 1):
         self.__channels_filename = channels_filename
         self.__days_ago = days_ago
         self.__fetch_assets()
@@ -226,4 +225,4 @@ if __name__ == "__main__":
     channels_filename = Path.cwd().parent.parent / 'files' / 'data_in' / 'source_youtubers.csv'
 
     # construct asset fetcher
-    asset_fetcher = AssetFetcher(channels_filename, 5)
+    asset_fetcher = AssetFetcher(channels_filename=channels_filename, days_ago=5)
