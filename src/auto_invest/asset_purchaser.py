@@ -19,7 +19,7 @@ class AssetPurchaser:
         Makes Public API call to purchase purchase_quantity of an asset 
         """
         # simulate purchase
-        if (self.__simulation_mode):
+        if (self.__is_simulation):
             # get ticker and make sure it's valid
             ticker_price = self.__get_stock_price(asset)
             if (ticker_price == -1.0):
@@ -40,7 +40,7 @@ class AssetPurchaser:
     def __init__(self, assets: List[str],  valid_purchase_days: int,
         asset_purchase_amounts: List[float] = None, 
         universal_purchase_amount: float = None,
-        simulation_mode: bool = True):
+        is_simulation: bool = True):
         if (asset_purchase_amounts == None):
             # user must specify either asset_purchase_amounts or universal_purchase_amount
             if (universal_purchase_amount == None):
@@ -51,10 +51,10 @@ class AssetPurchaser:
         # set class variables
         self.__assets = assets
         self.__asset_purchase_amounts = asset_purchase_amounts
-        self.__simulation_mode = simulation_mode
+        self.__is_simulation = is_simulation
         self.__valid_purchase_days = valid_purchase_days
         # open sim file if in simulation mode
-        if (simulation_mode):
+        if (is_simulation):
             portfolio_simulation_file = Path.cwd().parent.parent / 'files' / 'data_out' / 'portfolio_simulation.csv'
             self.file = open(portfolio_simulation_file, 'a')
         # purchase assets

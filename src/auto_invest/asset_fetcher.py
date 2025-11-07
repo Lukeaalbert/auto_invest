@@ -4,13 +4,13 @@ from dotenv import load_dotenv
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.formatters import JSONFormatter
 import google.generativeai as genai
-import googleapiclient.discovery
+from googleapiclient.discovery import build
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 import re
 import csv
 import os
 import json
-import datetime
 
 # load environment variables from .env file
 load_dotenv()
@@ -21,7 +21,22 @@ gemini_api_key = os.getenv("GEMINI_API_KEY")
 genai.configure(api_key=gemini_api_key)
 
 class AssetFetcher:
-    def __parse_channels(self) -> List[Set[str]]:
+
+    '''
+    Fetching Asset Logic
+    '''
+
+    def openVideoIdCache(self, mode: str):
+        valid_modes = {"a", "w", "r"}
+
+        video_id_cache_path = (
+            Path.cwd().parent.parent / "files" / "data_out" / "video_id_cache.csv"
+        )
+
+        self.file = open(video_id_cache_path, mode, encoding="utf-8")
+        return self.file
+
+    def parseChannelFile(self) -> List[Set[str]]:
         """
         Internal helper function.
         Parses the file of youtubers to fetch and returns a list of them 
@@ -39,27 +54,34 @@ class AssetFetcher:
 
         return [(name, channel_id) for name, channel_id, _ in channels]
 
-    def __get_new_videos_from_channels(self, channel_list) -> List[str]:
+    def getVideoIdsFromChannels(self, channel_list) -> List[str]:
         """
-        retrieves newly uploaded videos from all youtube channels in channel_list from the
-        last self.__days_ago days
-
-        returns:
-            list: a list of new video_ids, sorted by priority.
+        retrieves newly uploaded videos from all YouTube channels in `channel_list`
+        within the last `self.__delta_video_days` days.
+        Note that if in simulation mode, this is relative to `self.__simulation_run_date`
+        (defaults to today).
+        
+        returns a list of new video IDs, sorted by priority.
         """
-        youtube = googleapiclient.discovery.build("youtube", "v3", developerKey=youtube_api_key)
 
-        # retrieve videos from the uploads playlist.
-        # ordered by channel and publish date.
-        # i.e., (channel_1_vid_1, channel_1_vid_2, ..., channel_2_vid_1, channel_2_vid_2)
+        youtube = build("youtube", "v3", developerKey=youtube_api_key)
+
+        # use provided date or now
+        if ((not self.__simulation_mode) or (self.__simulation_run_date is None)):
+            self.__simulation_run_date = datetime.utcnow()
+
+        # calculate the publish date threshold
+        if self.__simulation_run_date is None:
+            self.__simulation_run_date = datetime.now(timezone.utc)
+        elif self.__simulation_run_date.tzinfo is None:
+            self.__simulation_run_date = self.__simulation_run_date.replace(tzinfo=timezone.utc)
+
+        published_after_date = (self.__simulation_run_date - timedelta(days=self.__delta_video_days)).isoformat("T")
+
         videos = []
 
         for channel in channel_list:
-            # get channel id
             channel_id = channel[1]
-
-            # calculate the publish date threshold
-            published_after_date = (datetime.datetime.now() - datetime.timedelta(days=self.__days_ago)).isoformat("T") + "Z"
 
             # get the uploads playlist ID for the channel
             channel_response = youtube.channels().list(
@@ -68,27 +90,29 @@ class AssetFetcher:
             ).execute()
 
             uploads_playlist_id = channel_response["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
-
             next_page_token = None
 
             while True:
                 playlist_items_response = youtube.playlistItems().list(
                     part="snippet",
                     playlistId=uploads_playlist_id,
-                    maxResults=50, # max allowed results per page
+                    maxResults=50,
                     pageToken=next_page_token
                 ).execute()
 
                 for item in playlist_items_response["items"]:
                     video_publish_date_str = item["snippet"]["publishedAt"]
-                    video_publish_date = datetime.datetime.fromisoformat(video_publish_date_str.replace("Z", "+00:00"))
+                    video_publish_date = datetime.fromisoformat(video_publish_date_str.replace("Z", "+00:00"))
+                    threshold_date = datetime.fromisoformat(published_after_date.replace("Z", "+00:00"))
 
-                    if video_publish_date >= datetime.datetime.fromisoformat(published_after_date.replace("Z", "+00:00")):
+                    # check if video is within the date window
+                    threshold_date = datetime.fromisoformat(published_after_date.replace("Z", "+00:00"))
+                    if threshold_date <= video_publish_date <= self.__simulation_run_date:
                         videos.append(item["snippet"]["resourceId"]["videoId"])
-                    else:
-                        # videos are ordered by publish date (newest first), so if we hit an older video, we can stop
+                    elif video_publish_date < threshold_date:
+                        # since videos are ordered by newest → oldest, stop once we pass threshold
                         next_page_token = None
-                        break # exit the inner loop and stop fetching more pages
+                        break
 
                 next_page_token = playlist_items_response.get("nextPageToken")
                 if not next_page_token:
@@ -96,7 +120,7 @@ class AssetFetcher:
 
         return videos
     
-    def __get_youtube_transcripts(self, video_ids) -> List[str]:
+    def getTranscriptsFromVideoIds(self, video_ids) -> List[str]:
         """
         retrieves the transcripts for the YouTube videos specified in video_ids.
     
@@ -123,10 +147,10 @@ class AssetFetcher:
 
         return transcripts
 
-    def __extract_recommendations_from_transcript(self, transcript: str,
+    def extractRecommendationsFromTranscript(self, transcript: str,
         model_object: genai.GenerativeModel) -> List[str]:
         """
-        use Gemini to extract a list of stocks recommended in the transcript.
+        use gemini to extract a list of stocks recommended in the transcript.
         returns a list of stock tickers or names found in that transcript.
         """
         user_prompt_template = (
@@ -164,7 +188,7 @@ class AssetFetcher:
             
         return stocks
 
-    def __aggregate_recommendations(self, transcripts: List[str]) -> List[str]:
+    def identifyAssetsFromTranscript(self, transcripts: List[str]) -> List[str]:
         """
         parses multiple transcripts and returns a sorted list of unique stocks,
         roughly sorted by how many times they were recommended across all transcripts.
@@ -192,7 +216,7 @@ class AssetFetcher:
         for t in transcripts:
             try:
                 # pass the configured model object
-                stocks = self.__extract_recommendations_from_transcript(t, model)
+                stocks = self.extractRecommendationsFromTranscript(t, model)
             except Exception as e:
                 print(f"Warning: error processing transcript: {e}")
                 stocks = []
@@ -204,25 +228,68 @@ class AssetFetcher:
         sorted_stocks = [stock for stock, _ in counts.most_common()]
         return sorted_stocks
 
-    def __fetch_assets(self) -> Set[str]:
+    def fetchAssets(self) -> Set[str]:
         """
-        Main logic. fetches assets using user defined hueristic/fetching method.
+        main logic. fetches assets using user defined hueristic/fetching method.
         """ 
-        yt_channels = self.__parse_channels()
-        new_videos = self.__get_new_videos_from_channels(yt_channels)
-        transcripts = self.__get_youtube_transcripts(new_videos)
-        reccomendations = self.__aggregate_recommendations(transcripts)
-        for rec in reccomendations:
-            print(rec)
+        yt_channels = self.parseChannelFile()
+        video_ids = self.getVideoIdsFromChannels(yt_channels)
+        # Note: TODO
+        # new_video_ids = FilterOutSeenVideoIds(yt_channels)
+        # self.__new_youtube_video_ids = new_video_ids
+        self.__new_youtube_video_ids = video_ids # TODO delete me
+        transcripts = self.getTranscriptsFromVideoIds(video_ids)
+        reccomendations = self.identifyAssetsFromTranscript(transcripts)
+        self.__fetched_recommendations = reccomendations
+    
+    '''
+    Getters
+    '''
+    
+    def getFetchedAssets(self):
+        return self.__fetched_recommendations
+    
+    def getNewYoutubeVideoIds(self):
+        return self.__new_youtube_video_ids
 
-    def __init__(self, channels_filename: str, days_ago: int = 1):
+    '''
+    Constructor
+    '''
+
+    def __init__(self, channels_filename: str, delta_video_days: int,
+        simulation_mode: bool = True, simulation_run_date: datetime = None):
+        # set simulation specific member variables, if needed
+        if (simulation_mode):
+            if (simulation_run_date == None):
+                print(f"Asset Fetcher Error: must provide a simulation run date when in simulation mode.")
+            else:
+                self.__simulation_run_date = simulation_run_date
+        self.__simulation_mode = simulation_mode
         self.__channels_filename = channels_filename
-        self.__days_ago = days_ago
-        self.__fetch_assets()
+        self.__delta_video_days = delta_video_days
+        # invoke asset fetching
+        self.fetchAssets()
 
 if __name__ == "__main__":
     # file paths
     channels_filename = Path.cwd().parent.parent / 'files' / 'data_in' / 'source_youtubers.csv'
 
+    # date
+    custom = datetime(2025, 1, 1)
+
     # construct asset fetcher
-    asset_fetcher = AssetFetcher(channels_filename=channels_filename, days_ago=5)
+    asset_fetcher = AssetFetcher(channels_filename=channels_filename,
+        delta_video_days=5, simulation_mode=True, simulation_run_date=custom)
+    
+    fetched_assets = asset_fetcher.getFetchedAssets()
+
+    for asset in fetched_assets:
+        print(asset)
+    
+    video_ids = asset_fetcher.getNewYoutubeVideoIds()
+
+    for video in video_ids:
+        print(video)
+
+    # TODO:
+    # impliment FilterOutSeenVideoIds method and video ID cache
